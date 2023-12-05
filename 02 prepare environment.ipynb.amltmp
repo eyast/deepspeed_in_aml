@@ -1,0 +1,399 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# Create and test an AzureML environment supporting DeepSpeed training\n",
+        "\n",
+        "__Goal__: Get a DeepSpeed environment setup within Azure ML\n",
+        "\n",
+        "This notebook shows how to build an AzureML environment that supports [DeepSpeed] training. At the end of it you should have an environment, backed by a [Docker] image, that can train PyTorch and HuggingFace transformer models. We build our environment on a remote machine by default but also describe the process of building it locally for debugging purposes. \n",
+        "\n",
+        "## An aside on how environments are structured and created \n",
+        "\n",
+        "AzureML environments are [designed] to house all the dependencies for a particular experiment's computation as well as providing some standardized interfaces to plug into the AzureML run and context system. They are ultimately provisioned as running Docker images on single VMs (AzureML compute instances) or Kubernetes clusters (AzureML compute clusters). They are versioned and you can keep images around indefinitely, enabling recreation of past work and reducing \"it worked on my machine, I don't know\" problems.\n",
+        "\n",
+        "Environments can be created or accessed in a number of ways. You can access and use [curated environments]: pre-built environments that support popular libraries such as scikit-learn and PyTorch. If these environments have what you need, they are convenient and well-maintained. You can also add additional libraries onto them by [cloning] them and adding additional PIP or Conda dependencies. These modified environments can be re-built each time they are used or cached as compiled Docker images in an attached Azure Container Repository (ACR). Ultimately all environments that are persisted are stored as cached Docker images in ACR. \n",
+        "\n",
+        "Instead of working with a curated environment, stock or modified, we can also create a Dockerfile defining the environment directly. This file can be built locally and pushed to ACR or uploaded to AzureML for remote compilation and storage. The former allows for local debugging but the latter is faster and doesn't require any local CLI usage. We'll explore the remote building option here and describe the local process should you need to perform debugging. \n",
+        "\n",
+        "[DeepSpeed]: http://deepspeed.ai\n",
+        "[Docker]: https://docs.docker.com/get-started/overview/\n",
+        "[designed]: https://docs.microsoft.com/en-us/azure/machine-learning/concept-azure-machine-learning-architecture#\n",
+        "[curated environments]: https://docs.microsoft.com/en-us/azure/machine-learning/resource-curated-environments\n",
+        "[cloning]: https://docs.microsoft.com/en-us/azure/machine-learning/how-to-use-environments#use-a-curated-environment\n"
+      ],
+      "metadata": {
+        "tags": []
+      },
+      "id": "a8935abe-66b0-4e43-b550-0a2adb62cebd"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## Registering and building an environment on AzureML\n",
+        "\n",
+        "First we'll import our needed libraries and load the configuration."
+      ],
+      "metadata": {},
+      "id": "70d968f2-4b97-4be5-9f11-c46e235d7750"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import subprocess\n",
+        "import yaml\n",
+        "from pathlib import Path\n",
+        "import azureml.core\n",
+        "\n",
+        "with open('src/config.yml', 'r') as f:\n",
+        "    config = yaml.safe_load(f)"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {
+        "gather": {
+          "logged": 1701733455479
+        }
+      },
+      "id": "4fae1234-deea-489c-90d4-78dbea8f5972"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Now we'll connect to the AzureML [workspace] as described in `01 Create compute.ipynb`. \n",
+        "\n",
+        "[workspace]: https://docs.microsoft.com/en-us/azure/machine-learning/concept-workspace"
+      ],
+      "metadata": {},
+      "id": "91443a2f-a917-4867-8d98-ea3ee80f224a"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "workspace = azureml.core.Workspace.from_config()"
+      ],
+      "outputs": [],
+      "execution_count": 2,
+      "metadata": {
+        "gather": {
+          "logged": 1701730363079
+        }
+      },
+      "id": "99a8290e-81eb-4d93-8f18-e8b6076e077b"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Now we'll register the environment. "
+      ],
+      "metadata": {},
+      "id": "8611edc9-c5b7-4354-a009-9c2818d93daf"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "environment = azureml.core.Environment.from_dockerfile(\n",
+        "    name=config['environment'], \n",
+        "    dockerfile=Path(config['environment_dockerfile']).read_text()\n",
+        ")\n",
+        "environment.python.user_managed_dependencies = True\n",
+        "environment.python.interpreter_path = \"/opt/miniconda/bin/python\"\n",
+        "environment = environment.register(workspace)\n",
+        "\n",
+        "print(f\"{environment.name} version {environment.version} registered in {workspace.name}\")"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "deepspeed-transformers version 1 registered in xcs224\n"
+        }
+      ],
+      "execution_count": 3,
+      "metadata": {
+        "gather": {
+          "logged": 1701730379010
+        }
+      },
+      "id": "f134ed2c-6f55-493b-a512-437ecf46c2b5"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Our environment is now registered in the workspace, but hasn't been built. If we do nothing further it will be built the first time it is used in a run. But we can trigger the build process now, either here or within the AzureML Studio GUI, and check that it has completed successfully. We'll trigger this locally. "
+      ],
+      "metadata": {},
+      "id": "8a5788ed-6396-4bc2-b4b3-49b216f069c8"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "build = environment.build(workspace)\n",
+        "\n",
+        "print(f\"Current status is {build.status}.\")"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stderr",
+          "text": "Environment version is set. Attempting to register desired version. To auto-version, reset version to None.\n"
+        },
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "Current status is GettingOrProvisioningACR.\n"
+        }
+      ],
+      "execution_count": 4,
+      "metadata": {
+        "gather": {
+          "logged": 1701730428647
+        }
+      },
+      "id": "c02488be-e646-421b-b60e-a14bee298777"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Now we wait; this build takes 30 to 60 minutes. We can watch the build log within AzureML Studio in the environment's entry within the \"Environments\" tab, or by occasionally refreshing the URL below (available once the build instance is started and underway). The `build.status` turns to `Succeeded` upon success. "
+      ],
+      "metadata": {},
+      "id": "182af347-dabb-4028-a6be-92338d61a5d2"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "print(f\"Current status is {build.status}. We can track the build process at \\n {build.log_url}\")"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {},
+      "id": "00fcb977-2a5a-4e43-a9db-f97f380a2501"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "With that complete we can move onto the next phase and next notebook, building our dataset in `03 Prepare data.ipynb`."
+      ],
+      "metadata": {},
+      "id": "b2ba84fe-0719-48dc-b2cd-264377d051db"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "# Optional: Should you need to debug your Docker image\n",
+        "\n",
+        "The hardest part of working with this environment on AzureML is the long debugging loop. Each time a DeepSpeed-supporting Docker image is built from scratch it takes 30-60 minutes because of the number of dependencies it must build. If you are debugging your Docker image you only get to change a couple of things a day. To shorten this loop we can build the Docker image locally. This allows the use of cached docker layers in subsequent builds and interactive exploration of the Conda environment within the image. This greatly shortens debugging.  \n",
+        "\n",
+        "The locally built image can be used solely for debugging or pushed to ACR and AzureML as a full environment. \n",
+        "\n",
+        "## Process overview\n",
+        "\n",
+        "The process for creating our local build and then transforming it into an environment looks like:\n",
+        "\n",
+        "- Locally build the Deepspeed docker image\n",
+        "- Verify Deepspeed's installation and configuration by dropping into the image and running `dsreport`\n",
+        "- Optional\n",
+        "    - Register it with ACR \n",
+        "    - Create an environment pointing to that ACR-hosted image\n",
+        "    - Register the environment\n",
+        "    - Build the environment, pulling the built image from the ACR, adding AzureML environment and network details, and pushing the result as a new image back to ACR"
+      ],
+      "metadata": {},
+      "id": "4c54c5fd"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Since most of the local work happens on the command line, we'll set some configuration options and then provide some example shell commands. "
+      ],
+      "metadata": {},
+      "id": "44beb5aa"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "acr_name = workspace.get_details()[\"containerRegistry\"].split(\"/\")[-1] \n",
+        "container_name = f\"{acr_name}.azurecr.io/{config['experiment']}/{config['environment']}\""
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {},
+      "id": "48a444a3"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Execute the next two lines in the root of the cloned repo to locally build the dockerfile and tag it for later retrieval. This will take between one minute and about an hour depending on how many layers you've previously cached locally. "
+      ],
+      "metadata": {},
+      "id": "13ca6b6a-307e-4453-9a43-838c39abcb94"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "cmds = (f\"docker build {config['source_directory']} .\",\n",
+        "        'LATEST=`docker images --format \"{{.ID}}\" | head -n 1`',\n",
+        "       f\"docker tag $LATEST {container_name}\"\n",
+        "       )\n",
+        "\n",
+        "for line in cmds:\n",
+        "    print(line)"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {},
+      "id": "2055c04e-9151-4640-90cd-3abd2b75b963"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "To drop into the container for debugging run:"
+      ],
+      "metadata": {},
+      "id": "cadd2b45-f0ef-4b4b-9556-7871db7196c1"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "print(f\"docker run -it {container_name} bash\")"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {},
+      "id": "42cac26b-a690-479a-945e-e8bb7c25c848"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Finally, should you wish to build an environment off of this dockerfile you may upload it to the relevant ACR by executing the following. \n",
+        "\n",
+        "Note: You must follow the link after executing `az login` to, well, log in to the Azure subscription"
+      ],
+      "metadata": {},
+      "id": "e88a0ee8"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "cmds = (\n",
+        "    f\"az login\",\n",
+        "    f\"az acr login --name {acr_name}\",\n",
+        "    f\"docker push {container_name}:latest\"\n",
+        ")\n",
+        "for line in docker_build_commands: \n",
+        "    print(line)"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {},
+      "id": "cd378a96"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "We have a docker image in ACR. We can create an environment that inherits this ACR-located file as the base docker image and build a new environment. The environment build process appends some additional AzureML specific layers to our pre-built docker image. Building these additional layers, plus pulling the image from the ACR, will take a few minutes to complete. You can watch the progress of the job from within the Environments tab of AzureML studio. "
+      ],
+      "metadata": {},
+      "id": "448ea91a"
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "environment = azureml.core.Environment(config['environment'])\n",
+        "environment.docker.base_image = f\"{container_name}:latest\"\n",
+        "environment.python.user_managed_dependencies = True\n",
+        "environment.python.interpreter_path = \"/opt/miniconda/bin/python\"\n",
+        "environment = environment.register(workspace)\n",
+        "environment.build(workspace)"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {},
+      "id": "54752039"
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Now you've got an environment you can use and a head-start on debugging it should you need to make changes in the future. "
+      ],
+      "metadata": {},
+      "id": "dd7074cf-a151-4f43-ac34-6387500073fe"
+    }
+  ],
+  "metadata": {
+    "kernel_info": {
+      "name": "python38-azureml"
+    },
+    "kernelspec": {
+      "name": "python38-azureml",
+      "language": "python",
+      "display_name": "Python 3.8 - AzureML"
+    },
+    "language_info": {
+      "name": "python",
+      "version": "3.8.5",
+      "mimetype": "text/x-python",
+      "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+      },
+      "pygments_lexer": "ipython3",
+      "nbconvert_exporter": "python",
+      "file_extension": ".py"
+    },
+    "nteract": {
+      "version": "nteract-front-end@1.0.0"
+    },
+    "toc": {
+      "toc_position": {},
+      "skip_h1_title": false,
+      "number_sections": true,
+      "title_cell": "Table of Contents",
+      "toc_window_display": true,
+      "base_numbering": 1,
+      "toc_section_display": true,
+      "title_sidebar": "Contents",
+      "toc_cell": false,
+      "nav_menu": {},
+      "sideBar": true
+    },
+    "varInspector": {
+      "cols": {
+        "lenName": 16,
+        "lenType": 16,
+        "lenVar": 40
+      },
+      "kernels_config": {
+        "python": {
+          "delete_cmd_postfix": "",
+          "delete_cmd_prefix": "del ",
+          "library": "var_list.py",
+          "varRefreshCmd": "print(var_dic_list())"
+        },
+        "r": {
+          "delete_cmd_postfix": ") ",
+          "delete_cmd_prefix": "rm(",
+          "library": "var_list.r",
+          "varRefreshCmd": "cat(var_dic_list()) "
+        }
+      },
+      "types_to_exclude": [
+        "module",
+        "function",
+        "builtin_function_or_method",
+        "instance",
+        "_Feature"
+      ],
+      "window_display": false
+    },
+    "microsoft": {
+      "ms_spell_check": {
+        "ms_spell_check_language": "en"
+      }
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}

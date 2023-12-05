@@ -11,7 +11,7 @@ environment: deepspeed-transformers
 environment_dockerfile: src/dockerfile
 training_command: python train.py
 compute_target: gpu-K80-1
-compute_size: Standard_NC6 # 1 gpu-per-computer
+compute_size: STANDARD_NC4AS_T4_V3 # Standard_NC6 # 1 gpu-per-computer
 compute_node_count: 2
 model_output_dir: outputs/model
 registered_model_name: distilbert-base-uncased-cola
